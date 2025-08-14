@@ -1,0 +1,28 @@
+[project]
+name = "gremln"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "lightning>=2.5.2",
+    "llvmlite>=0.40.0",
+    "ninja>=1.11.1.4",
+    "numba>=0.61.0",
+    "numpy>=2.2.6",
+    "pandas>=2.3.1",
+    "polars>=1.31.0",
+    "pyarrow>=21.0.0",
+    "scanpy>=1.11.3",
+    "scikit-learn>=1.7.1",
+    "torch>=2.7.1",
+    "torch-geometric>=2.6.1",
+    "torchaudio>=2.7.1",
+    "torchvision>=0.22.1",
+]
+
+[dependency-groups]
+interactive = [
+    "ipykernel>=6.30.0",
+    "jupyter>=1.1.1",
+]
