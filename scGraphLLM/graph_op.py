@@ -1,7 +1,8 @@
 import torch
 from torch_geometric.utils import scatter, remove_self_loops
-
+from torch_geometric.data import Data, Batch
 from scGraphLLM._globals import *  ## imported global variables are all caps 
+
 
 def _identity(x):
     return x
@@ -58,7 +59,7 @@ def _chebyshev_coeff(L_rescaled, K, func, N=100):
     return c_k
 
 @torch.amp.autocast(enabled=False, device_type='cuda')
-def _chebyshev_diffusion_per_sample(edge_index, num_nodes, E, k=128, edge_weight=None, beta=0.5):
+def _chebyshev_diffusion_batch(edge_index, num_nodes, E, k=128, edge_weight=None, beta=0.5):
     """
     E: (S, H, d)
     """
@@ -94,20 +95,35 @@ def _chebyshev_diffusion(edge_index_list, num_nodes_list, E, k=64, beta=0.5):
     E: (B, S, H, d)
     """
     B, S, H, D = E.size()
-    final_emb = []
     
-    for i in range(B):
-        E_i = E[i, :num_nodes_list[i], ...]
-        edge_index = edge_index_list[i]
-        num_nodes = num_nodes_list[i]
-        sample_emb = _chebyshev_diffusion_per_sample(edge_index, num_nodes_list[i], E_i, k=k, beta=beta)
-        
-        # pad zero at the right end
-        pad_size = S - sample_emb.size(0)
-        if pad_size > 0:
-            zero_pad_right = torch.zeros(pad_size, H, D, device=E.device, dtype=E.dtype)
-            sample_emb = torch.cat([sample_emb, zero_pad_right], dim=0)
-        final_emb.append(sample_emb)
-    fe = torch.stack(final_emb, dim=0)
-    assert fe.size() == E.size(), f"Expect {E.size()}, Got {fe.size()}"
-    return fe
+    # 1. Create a mask to un-pad the (B, S, H, D) tensor
+    num_nodes_tensor = torch.tensor(num_nodes_list, device=E.device, dtype=torch.long)
+    mask = torch.arange(S, device=E.device)[None, :] < num_nodes_tensor[:, None]
+    
+    # 2. Un-pad E
+    # Shape goes from (B, S, H, D) -> (total_nodes, H, D)
+    unpadded_E = E[mask]
+    
+    # 3. Create a single PyG Batch object
+    data_list = [Data(edge_index=ei, num_nodes=n) for ei, n in zip(edge_index_list, num_nodes_list)]
+    pyg_batch = Batch.from_data_list(data_list)
+    
+    batched_edge_index = pyg_batch.edge_index.to(E.device)
+    total_nodes = pyg_batch.num_nodes # This is sum(num_nodes_list)
+
+    # 4. Run batched diffusion 
+    diffused_unpadded_E = _chebyshev_diffusion_batch(
+        batched_edge_index, 
+        total_nodes, 
+        unpadded_E, 
+        k=k, 
+        edge_weight=None, # Assuming edge_weight is None
+        beta=beta
+    )
+    
+    # 5. Re-pad the result
+    final_emb = torch.zeros_like(E)
+    final_emb[mask] = diffused_unpadded_E
+    
+    assert final_emb.size() == E.size(), f"Expect {E.size()}, Got {final_emb.size()}"
+    return final_emb
