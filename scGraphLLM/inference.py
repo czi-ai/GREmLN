@@ -168,9 +168,10 @@ def get_cell_embeddings(
 
     x_list = []
     obs_names_list = []
+    device = next(model.parameters()).device
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Forward Pass"):
-            seq_lengths = torch.tensor(batch["num_nodes"]).to("cuda")
+            seq_lengths = torch.tensor(batch["num_nodes"], device=device)
             obs_names = batch["obs_name"]
             x = model(send_to_gpu(batch))[0]  # shape: [B, T, H]
             gene_ids = batch["orig_gene_id"]  # shape: [B, T]
@@ -234,19 +235,42 @@ def get_gene_embeddings(
     gene_counts = defaultdict(int)
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Forward Pass"):
-            seq_lengths = torch.tensor(batch["num_nodes"]).to("cuda")
-            gene_ids = batch["orig_gene_id"].detach().cpu().numpy()
-            x = model(send_to_gpu(batch))[0] # shape: [B, T, H]
-            
-            for x_cell, ids, seq_len in zip(x, gene_ids, seq_lengths):
-                for j in range(seq_len):
-                    gene_id = ids[j]
-                    x_gene = x_cell[j].detach().cpu().numpy()
-                    if gene_id not in gene_embedding_sums:
-                        gene_embedding_sums[gene_id] = x_gene.copy()
-                    else:
-                        gene_embedding_sums[gene_id] += x_gene
-                    gene_counts[gene_id] += 1
+            seq_lengths = torch.as_tensor(batch["num_nodes"], device="cuda", dtype=torch.long)
+            gene_ids = batch["orig_gene_id"].to("cuda")         # [B, T]
+            x = model(send_to_gpu(batch))[0]                    # [B, T, H]
+
+            B, T, H = x.shape
+            valid_mask = torch.arange(T, device=x.device)[None, :] < seq_lengths[:, None]  # [B, T]
+
+            flat_x = x.reshape(-1, H)                               # [B*T, H]
+            flat_gene_ids = gene_ids.reshape(-1).to(torch.long)     # [B*T]
+            flat_mask = valid_mask.reshape(-1)                      # [B*T]
+
+            # Keep only valid tokens
+            valid_x = flat_x[flat_mask]                              # [N, H]
+            valid_gene_ids = flat_gene_ids[flat_mask]                # [N]
+
+            # Group-by gene_id on GPU
+            unique_ids, inverse = torch.unique(valid_gene_ids, return_inverse=True)
+
+            # Sum embeddings per unique gene id
+            sums = torch.zeros((unique_ids.numel(), H), device=valid_x.device, dtype=valid_x.dtype)
+            sums.index_add_(0, inverse, valid_x)   # segment sum
+
+            # Counts per unique id
+            counts = torch.bincount(inverse, minlength=unique_ids.numel())   # [U]
+
+            # Move once to CPU and update Python dicts
+            unique_ids_cpu = unique_ids.tolist()
+            sums_cpu = sums.cpu().numpy()
+            counts_cpu = counts.cpu().tolist()
+
+            for gid, emb_sum, cnt in zip(unique_ids_cpu, sums_cpu, counts_cpu):
+                if gid not in gene_embedding_sums:
+                    gene_embedding_sums[gid] = emb_sum.copy()
+                else:
+                    gene_embedding_sums[gid] += emb_sum
+                gene_counts[gid] += int(cnt)
 
     # compute average embedding per gene
     gene_embeddings = {

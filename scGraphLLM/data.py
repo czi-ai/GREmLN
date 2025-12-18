@@ -58,8 +58,9 @@ def scglm_collate_fn(batch, pad_node, inference=False):
         data["obs_name"] = []
     
     # Make a dictionary of lists from the list of dictionaries
+    keys = list(data.keys())
     for b in batch:
-        for key in data.keys():
+        for key in keys:
             data[key].append(b[key])
 
     # Pad these dictionaries of lists
